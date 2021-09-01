@@ -1,0 +1,268 @@
+---
+title: "Mapping Project"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+`
+```{r}
+library(tidygeocoder)
+library(tidyverse)
+library(ggmap)
+library(zipcodeR)
+```
+
+```{r}
+#setwd("~/Documents/R analysis/WA Nonprofits Project")
+```
+
+
+```{r}
+#We need to load a csv file with the IRS data on all nonprofits registered in Washington state: 
+EO_BMF_WA<- read.csv("/Users/aishe/Documents/R\ analysis/WA\ Nonprofits\ Project\ /EO_BMF_WA_May2021.csv")
+```
+
+```{r}
+#Filter by tax period (last 3-4 years) and keep only 501c(3) organizations. Make ruling year and NTEE codes more approachable by extracting only year. 
+DF<- EO_BMF_WA %>%
+  dplyr::mutate(ruling_year = substr(RULING, 1,4)) %>% 
+  filter(SUBSECTION ==3) %>% 
+  dplyr::mutate(tax_year = substr(TAX_PERIOD, 1,4)) %>% 
+  filter(tax_year %in% c("2018", "2019", "2020", "2021")) %>% 
+  dplyr::mutate(short_zip = substr(ZIP, 1,5))
+
+```
+
+```{r}
+#Next, I re-code the filing requirement column for easier understanding
+DF<- DF %>% mutate(FILING_REQ_CD =recode(FILING_REQ_CD, 
+                         `1`="990s and 990EZ",
+                         `2`="990N, Postcard",
+                         `3` = "990s and 990EZ",
+                         `4` = "990s and 990EZ",
+                         `6` = "Religious Organization",
+                         `7` = "990s and 990EZ",
+                         `13` = "Religious Organization",
+                         `14` = "Not required to file",
+                         `0` = "Not required to file"))
+
+```
+
+
+```{r}
+#Here I would like to assign a new variable which indicates the kind of the organization based on its filing requirement
+DF_NP_SIZE<- DF %>% 
+  dplyr::mutate(Organization = case_when(PF_FILING_REQ_CD == 1 ~ 'Private Foundation',
+                                                            FILING_REQ_CD =="990N, Postcard" ~ 'Small',
+                                                            (FILING_REQ_CD == "990s and 990EZ" & REVENUE_AMT < 200000 |FILING_REQ_CD == "990s and 990EZ" & ASSET_AMT < 500000) ~ 'Medium',
+                                                            FILING_REQ_CD == "990s and 990EZ" ~ 'Large',
+                                                            FILING_REQ_CD == "Religious Organization" ~ 'Religious',
+                                         
+                                                            TRUE~ 'Other' ))
+DF_NP_SIZE %>% group_by(Organization) %>% summarise(n=n()) 
+DF_NP_SIZE %>% filter(Organization == "Other") 
+```
+
+
+
+##Finding latitudes and longitudes of the addresses:
+#We need to understand which zip codes belong to which counties in WA to be able to later join this dataframe with the spatial file where polygons have labels of counties.
+```{r}
+ZIP_County_WA<- read.csv(
+    '/Users/aishe/Documents/R\ analysis/WA\ Nonprofits\ Project\ /WA_zip_counties.csv', header = TRUE)
+```
+
+```{r}
+#Note that ZIP column in this dataframe is integer
+ZIP_County_WA
+```
+
+
+```{r}
+#Since we need to join two dataframes, let's make sure short_zip column is of an integer type.
+DF_NP_SIZE<- DF_NP_SIZE %>% mutate(short_zip = as.integer(short_zip))
+DF_NP_SIZE
+```
+```{r}
+DF_ZIP_COUNTY <- inner_join(DF_NP_SIZE, ZIP_County_WA, by = c("short_zip" = "ZIP"))
+```
+
+```{r}
+#Next, we need to filter out organizations with PO BOX addresses
+DF_ZIP_COUNTY_woPOBOX<- DF_ZIP_COUNTY %>% filter(!(str_detect(STREET, "PO BOX")))
+DF_ZIP_COUNTY_woPOBOX
+```
+```{r}
+#Now we need to create a column with the full address of the organization
+DF_ZIP_COUNTY_woPOBOX$newcol<- paste(DF_ZIP_COUNTY_woPOBOX$STREET, DF_ZIP_COUNTY_woPOBOX$CITY, DF_ZIP_COUNTY_woPOBOX$STATE, sep = ", " )
+DF_ZIP_COUNTY_woPOBOX$newcol_1<- paste(DF_ZIP_COUNTY_woPOBOX$newcol, DF_ZIP_COUNTY_woPOBOX$short_zip, sep = " ")
+```
+
+
+```{r}
+#Since it takes very ling to process the whole dataset, let's split it to 4 parts:
+DF_ZIP_COUNTY_woPOBOX_1 = DF_ZIP_COUNTY_woPOBOX[1:5000, ]
+DF_ZIP_COUNTY_woPOBOX_2 = DF_ZIP_COUNTY_woPOBOX[5000:10000, ]
+DF_ZIP_COUNTY_woPOBOX_3 = DF_ZIP_COUNTY_woPOBOX[10000:15000, ]
+DF_ZIP_COUNTY_woPOBOX_4 = DF_ZIP_COUNTY_woPOBOX[15000:17294, ]
+
+```
+
+
+
+```{r}
+#Now it is time to get latitudes and longitudes
+Part_1<- DF_ZIP_COUNTY_woPOBOX_1 %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = 'osm', lat = latitude, lon = longitude)
+Part_2<- DF_ZIP_COUNTY_woPOBOX_2 %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = 'osm', lat = latitude, lon = longitude)
+Part_3<- DF_ZIP_COUNTY_woPOBOX_3 %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = 'osm', lat = latitude, lon = longitude)
+Part_4<- DF_ZIP_COUNTY_woPOBOX_4 %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = 'osm', lat = latitude, lon = longitude)
+```
+
+```{r}
+#Here we join the four datasets together:
+DF_with_LatLon<- rbind(Part_1, Part_2, Part_3, Part_4)
+DF_with_LatLon
+```
+
+```{r}
+#Next step is to join the dataset with latitude and longitude with the original dataset
+Forjoin<- DF_with_LatLon %>% select(EIN, latitude, longitude)
+df_geo <- left_join(DF_NP_SIZE, Forjoin, by = "EIN")
+```
+
+```{r}
+#We notice that some of the rows have NA latitude and/or longitude
+df_geo
+```
+
+
+```{r}
+#Part of the problem is that cities are misspelled sometimes:
+df_geo <- df_geo %>% 
+  mutate(CITY = str_replace(CITY, "LK FOREST PK", "LAKE FOREST PARK")) %>% 
+  mutate(CITY = str_replace(CITY, "FEDERALWAY", "FEDERAL WAY")) %>% 
+  mutate(CITY = str_replace(CITY, "SPOKANE VLY", "SPOKANE VALLEY")) %>% 
+  mutate(CITY = str_replace(CITY, "VANCOVER", "VANCOUVER")) %>% 
+  mutate(CITY = str_replace(CITY, "PORTANGELES", "PORT ANGELES")) %>% 
+  mutate(CITY = str_replace(CITY, "PORT TOWSEND", "PORT TOWNSEND")) %>%
+  mutate(CITY = str_replace(CITY, "SILVERLAKE", "SILVER LAKE")) %>%
+  mutate(CITY = str_replace(CITY, "JBLM", "JOINT BASE LEWIS MCCHORD")) %>%
+  mutate(CITY = str_replace(CITY, "JB LEWIS MCCHORD", "JOINT BASE LEWIS MCCHORD")) %>%
+  mutate(CITY = str_replace(CITY, "BLACKDIAMOND", "BLACK DIAMOND")) %>%
+  mutate(CITY = str_replace(CITY, "GOLDBAR", "GOLD BAR")) %>%
+  mutate(CITY = str_replace(CITY, "LITTLEROCK", "LITTLE ROCK")) %>%
+  mutate(CITY = str_replace(CITY, "FWEDERAL WAY", "FEDERAL WAY"))
+
+```
+
+```{r}
+# Now we need to generate lat/lon pairs for PO Boxes based on Zip Code
+df_geo_po_box <- df_geo %>% filter((is.na(latitude) | is.na(longitude)) & str_detect(STREET, "PO BOX")) %>% inner_join(zip_code_db[, c("zipcode", "lat", "lng")], by=c("short_zip" = "zipcode"))
+df_geo_po_box <- df_geo_po_box %>% mutate(latitude = coalesce(latitude,lat)) %>% mutate(longitude = coalesce(longitude,lng)) %>% select(-one_of("lat", "lng"))
+
+# some are still not filled, use City to generate lat long (TODO)
+```
+
+```{r}
+# merge po box data into the total frame
+Forjoin <- df_geo_po_box %>% select(EIN, latitude, longitude)
+df_geo <- left_join(df_geo, Forjoin, by = "EIN") %>% mutate(latitude = coalesce(latitude.x,latitude.y)) %>% mutate(longitude = coalesce(longitude.x,longitude.y)) %>%select(-one_of("latitude.x", "latitude.y", "longitude.x", "longitude.y"))
+```
+
+
+
+```{r}
+df_geo %>% summarise(n=n())
+df_geo %>% filter(is.na(latitude)) %>% summarise(n=n())
+df_geo %>% filter(is.na(latitude) & str_detect(STREET, "PO BOX")) %>% summarise(n=n())
+```
+
+```{r}
+# first geo pass, OSM
+df_geo_new <- df_geo %>% filter(is.na(latitude)) %>% select(-one_of("latitude", "longitude")) %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = "osm", lat = latitude, lon = longitude)
+
+Forjoin <- df_geo_new %>% select(EIN, latitude, longitude)
+
+df_geo <- left_join(df_geo, Forjoin, by = "EIN") %>% mutate(latitude = coalesce(latitude.x,latitude.y)) %>% mutate(longitude = coalesce(longitude.x,longitude.y)) %>%select(-one_of("latitude.x", "latitude.y", "longitude.x", "longitude.y"))
+```
+
+```{r}
+# second geo pass, census
+df_geo_new <- df_geo %>% filter(is.na(latitude)) %>% select(-one_of("latitude", "longitude")) %>% geocode(street = STREET, city = CITY, state = STATE, postalcode = ZIP, method = "census", lat = latitude, lon = longitude)
+
+Forjoin <- df_geo_new %>% select(EIN, latitude, longitude)
+
+df_geo <- left_join(df_geo, Forjoin, by = "EIN") %>% mutate(latitude = coalesce(latitude.x,latitude.y)) %>% mutate(longitude = coalesce(longitude.x,longitude.y)) %>%select(-one_of("latitude.x", "latitude.y", "longitude.x", "longitude.y"))
+```
+
+
+```{r}
+# third pass, osm no street
+df_geo_new <- df_geo %>% filter(is.na(latitude)) %>% select(-one_of("latitude", "longitude")) %>% geocode(state = STATE, postalcode = ZIP, method = "osm", lat = latitude, lon = longitude)
+
+Forjoin <- df_geo_new %>% select(EIN, latitude, longitude)
+
+df_geo <- left_join(df_geo, Forjoin, by = "EIN") %>% mutate(latitude = coalesce(latitude.x,latitude.y)) %>% mutate(longitude = coalesce(longitude.x,longitude.y)) %>%select(-one_of("latitude.x", "latitude.y", "longitude.x", "longitude.y"))
+```
+
+```{r}
+# KENT, WA is not recognized properly for some reason
+df_geo <- df_geo %>% filter((latitude < 116 | latitude > 125 | longitude > 49 | longitude < 45.5) & (short_zip == "98035" | CITY == "KENT")) %>% mutate(latitude=47.3814) %>% mutate(longitude=-122.2336)
+df_geo <- df_geo %>% filter((latitude < 116 | latitude > 125 | longitude > 49 | longitude < 45.5) & (short_zip == "98064" | CITY == "KENT")) %>% mutate(latitude=47.3814) %>% mutate(longitude=-122.2339)
+df_geo
+```
+
+
+```{r}
+#Some rows need manual input of latitude and longitude
+df_geo[df_geo$EIN == 453306854, "latitude"] <- 47.172383
+df_geo[df_geo$EIN == 453306854, "longitude"] <- -122.174216
+
+df_geo[df_geo$EIN == 454947502, "latitude"] <- 47.172383
+df_geo[df_geo$EIN == 454947502, "longitude"] <- -122.174216
+
+df_geo[df_geo$EIN == 810955966, "latitude"] <- 47.172383
+df_geo[df_geo$EIN == 810955966, "longitude"] <- -122.174216
+
+df_geo[df_geo$EIN == 813270285, "latitude"] <- 47.172383
+df_geo[df_geo$EIN == 813270285, "longitude"] <- -122.174216
+
+df_geo[df_geo$EIN == 910956100, "latitude"] <- 47.172383
+df_geo[df_geo$EIN == 910956100, "longitude"] <- -122.174216
+
+df_geo[df_geo$EIN == 201821538, "latitude"] <- 47.2053943
+df_geo[df_geo$EIN == 201821538, "longitude"] <- -122.191661
+
+df_geo[df_geo$EIN == 237100798, "latitude"] <- 47.3881903
+df_geo[df_geo$EIN == 237100798, "longitude"] <- -122.6623521
+
+df_geo[df_geo$EIN == 264493162, "latitude"] <- 46.9020345
+df_geo[df_geo$EIN == 264493162, "longitude"] <- -123.019987
+
+df_geo[df_geo$EIN == 451168675, "latitude"] <- 46.901986
+df_geo[df_geo$EIN == 451168675, "longitude"] <- -123.0262503
+
+df_geo[df_geo$EIN == 461119445, "latitude"] <- 47.9114782
+df_geo[df_geo$EIN == 461119445, "longitude"] <- -122.7558634
+
+df_geo[df_geo$EIN == 660890439, "latitude"] <- 47.3882654
+df_geo[df_geo$EIN == 660890439, "longitude"] <- -122.6688973
+
+df_geo[df_geo$EIN == 821847194, "latitude"] <- 47.6798242
+df_geo[df_geo$EIN == 821847194, "longitude"] <- -117.1420293
+
+df_geo[df_geo$EIN == 911170835, "latitude"] <- 46.9020345
+df_geo[df_geo$EIN == 911170835, "longitude"] <- -123.019987
+
+df_geo[df_geo$EIN == 943161053, "latitude"] <- 47.3882654
+df_geo[df_geo$EIN == 943161053, "longitude"] <- -122.6688973
+
+```
+
+```{r}
+#Now looks like the entire dataset has latitude and longitude!
+write.csv(df_geo, "Full_dataset_Lat_Lon.csv")
+```
+
